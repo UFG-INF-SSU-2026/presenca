@@ -1,0 +1,35 @@
+# ---- Segredos: nunca vão para o repositório ---------------------------------
+# senhas do broker, segredo da âncora, chave privada do servidor
+segredos.json
+**/segredos.ts
+*.pem
+config.json
+
+# ---- Gerado ao rodar ---------------------------------------------------------
+*.log
+recebidos.log
+saida-consumidor.txt
+*.apk
+marco-03/documentacao/Marco3-Seguranca.html
+
+# ---- Python ------------------------------------------------------------------
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# ---- Node / Expo / Android ---------------------------------------------------
+node_modules/
+.expo/
+android/
+ios/
+dist/
+web-build/
+expo-env.d.ts
+
+# ---- Editores e ferramentas locais -------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

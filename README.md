@@ -63,7 +63,7 @@ medida num instante) por **permanência** (contínua, acumulada ao longo da aula
 | **Rede de sensores** | ✅ medição cooperativa, localização por âncoras, nó móvel, multi-salto |
 | **Sistema ciber-físico** | ✅ com humano no laço — a notificação atua sobre a posição medida |
 
-Justificativas completas em [`atividade-01.md`](atividade-01.md), item 8.
+Justificativas completas em [`docs/atividade-01.md`](docs/atividade-01.md), item 8.
 
 ## Risco principal
 
@@ -77,22 +77,29 @@ reconhecimento facial, sensor de pressão no piso — dispensariam aplicativo, b
 cooperação. Ubiquidade máxima, consentimento zero. O grupo optou deliberadamente por não
 maximizar a ubiquidade.
 
-## Documentos
+## Organização do repositório
 
-| Arquivo | Conteúdo |
+| Pasta / arquivo | Conteúdo |
 |---|---|
-| [`atividade-01.md`](atividade-01.md) | Análise inicial — os 9 itens da Atividade em Grupo 01 |
-| [`atividade-02.md`](atividade-02.md) | Processamento e distribuição — os 13 itens da Atividade em Grupo 02: contratos de evento, janelas, semântica temporal, eventos atrasados e distribuição dispositivo–borda–nuvem |
-| [`marco-02/README.md`](marco-02/README.md) | Marco 2 — fronteira de comunicação âncora ↔ gateway por MQTT: produtor ESP32, consumidor Python, contrato versionado e condições de falha |
+| [`marco-03/`](marco-03/README.md) | **Marco 3 — Segurança.** Canal cifrado (TLS), autenticação MQTT, todo dispositivo provando quem é (assinatura Ed25519 + token HMAC da âncora), atuação e produtor ↔ consumidor nos dois sentidos. Âncora Bluetooth real, app do celular, servidor e testes de ataque e de carga |
+| [`marco-02/`](marco-02/README.md) | Marco 2 — fronteira de comunicação aparelho ↔ servidor por MQTT: produtor ESP32 (Wokwi), servidor Python, contrato versionado e condições de falha |
+| [`docs/projeto-tecnico.md`](docs/projeto-tecnico.md) | Especificação completa: parâmetros, protocolo, máquina de estados, alternativas rejeitadas |
+| [`docs/atividade-01.md`](docs/atividade-01.md) | Atividade em Grupo 01 — análise inicial (9 itens) |
+| [`docs/atividade-02.md`](docs/atividade-02.md) | Atividade em Grupo 02 — processamento e distribuição (13 itens) |
+
+Cada marco tem o seu próprio README com o que foi pedido, como foi feito, como rodar e como testar.
 
 ## Estado atual
 
-Análise concluída (Atividades 01 e 02). Primeiro protótipo executável entregue no
-Marco 2: fronteira âncora ↔ gateway funcionando por MQTT.
+| Etapa | Situação |
+|---|---|
+| Atividades 01 e 02 | análise concluída |
+| Marco 2 | fronteira aparelho ↔ servidor por MQTT, com contrato e falhas (ESP32 no Wokwi) |
+| Marco 3 | sistema com rádio de verdade (notebook como âncora Bluetooth, app Android) e segurança de ponta a ponta |
 
-Próximos passos previstos:
+Próximos passos:
 
-- [ ] Trilateração e máquina de estados, com simulador de estudantes para teste
-- [ ] Firmware da âncora (beacon, token rotativo, malha ESP-NOW)
-- [ ] Aplicativo do estudante
+- [ ] Três âncoras ESP32 físicas com malha ESP-NOW (o firmware de uma âncora já está em `marco-03/esp32-ancora/`)
+- [ ] Medição real da distância pelo sinal e ajuste do modelo
+- [ ] Restrição de tópicos por usuário (ACL) no broker
 - [ ] Painel do professor
