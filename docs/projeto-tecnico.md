@@ -1,11 +1,19 @@
 # Presença — Documento de Projeto Técnico
 
-Especificação de referência do sistema. Registra **decisões fechadas, parâmetros
-numéricos e alternativas rejeitadas**, para que não seja necessário reconstruir o
-raciocínio a cada retomada.
+Especificação de referência do sistema. Registra **o que está construído, as decisões
+fechadas, os parâmetros numéricos e as alternativas rejeitadas**, para que não seja
+necessário reconstruir o raciocínio a cada retomada.
 
-Documentos irmãos: [`../README.md`](../README.md) (visão geral) e
+Documentos irmãos: [`../README.md`](../README.md) (visão geral),
+[`../marco-03/README.md`](../marco-03/README.md) (sistema atual, com segurança) e
 [`atividade-01.md`](atividade-01.md) (análise acadêmica dos 9 itens).
+
+> **Como ler este documento.** Desde o Marco 3, o sistema oficial é o protótipo com rádio de
+> verdade: **um notebook como âncora Bluetooth, o celular Android do estudante medindo o sinal
+> e um servidor Python de permanência**, conversando por MQTT cifrado. Cada seção descreve
+> primeiro **o que existe e roda** e, quando é diferente, **o desenho para a sala real**
+> (três âncoras, trilateração), marcado como *visão*. O que mudou em relação à proposta das
+> Atividades 01 e 02 está resumido na [seção 13](#13-o-que-mudou-desde-a-proposta).
 
 ---
 
@@ -15,201 +23,328 @@ O sistema mede a **permanência física** de estudantes em uma sala durante a ja
 aula e entrega ao professor a lista de frequência preenchida, mais avisos ao estudante
 quando uma ausência em curso ameaça sua presença.
 
-**Fora de escopo:** climatização, iluminação, consumo de energia, qualidade do ar. Foram
-considerados e descartados — o sistema é de presença, e ampliar dobraria o escopo sem
-fortalecer a proposta.
+### Dentro do escopo atual
+
+| Item | Situação |
+|---|---|
+| Âncora Bluetooth anunciando identificador + token rotativo assinado (HMAC) | ✅ notebook (`marco-03/ancora/`) |
+| App do estudante (Android) medindo o RSSI da âncora e enviando heartbeat assinado | ✅ `marco-03/app/` |
+| Área de administrador no app: turma, grade de horários, código/QR, calibração a 1 m, aula de demonstração | ✅ `marco-03/app/` |
+| Servidor de permanência: validação, máquina de estados, orçamento de ausência, avisos | ✅ `marco-03/servidor/` |
+| Segurança de ponta a ponta: TLS, usuário e senha por papel, assinatura Ed25519 em toda mensagem | ✅ broker EMQX Cloud |
+| Atuação no celular (vibração, notificação, aviso na tela) só com mensagem autêntica | ✅ |
+| Contrato de mensagens versionado (JSON Schema) | ✅ `marco-03/contrato/v1/` |
+| Testes automáticos, demonstração de ataques e teste de carga | ✅ 49 (servidor) + 22 (app) |
+
+### Visão, ainda não construída
+
+- Três âncoras ESP32 fixas na sala, com malha ESP-NOW e trilateração + polígono. O servidor
+  já sabe trilaterar (exercitado no Marco 2); o firmware de uma âncora ESP32 está pronto em
+  `marco-03/esp32-ancora/`, mas não foi gravado em placa.
+- Painel web do professor e integração com o sistema acadêmico.
+- Restrição de tópicos por usuário (ACL) no broker.
+
+### Fora do escopo
+
+Climatização, iluminação, consumo de energia, qualidade do ar. O sistema é de presença;
+ampliar dobraria o escopo sem fortalecer a proposta. A âncora com sensor de CO₂ do Marco 2
+(conferir a contagem do rádio contra a ocupação da sala) foi um experimento contra o conluio
+em massa e **não faz parte do sistema atual**. iOS também ficou fora: o app é Android.
 
 ## 2. Arquitetura
 
-### Camadas
+### As quatro peças
 
-| Camada | Componente | Responsabilidade |
+| Peça | Implementação atual | Responsabilidade |
 |---|---|---|
-| Sala | 3 × âncora ESP32 | Transmitir sinal identificado + token rotativo; malha entre si |
-| Sala | Smartphone do estudante | Medir sinal das âncoras, IMU e bateria; assinar e enviar heartbeat |
-| Borda | Gateway | Agenda, abertura/encerramento de sessão, carimbo de tempo, amortecimento |
-| Núcleo | Servidor | Trilateração, máquina de estados, banco, verificação criptográfica |
-| Núcleo | Painel web | Consulta e revisão de exceções pelo professor |
+| **Âncora** | Notebook Windows, `ancora.py` (Bluetooth LE via WinRT) | Anunciar `PRS1` + número da âncora + token HMAC renovado a cada 12 s. Só transmite |
+| **Celular do estudante** | App React Native (Expo SDK 57), APK Android | Ouvir a âncora, filtrar o RSSI, decidir a região de rádio, assinar e enviar o heartbeat; conferir e exibir o estado; atuar nos avisos |
+| **Broker** | EMQX Cloud Serverless (MQTT 3.1.1) | Entregar mensagens; só aceita TLS e usuário/senha |
+| **Servidor** | Python, `servidor.py` + `permanencia.py` + `seguranca.py` | Conferir assinatura, contrato, identidade e token; calcular a permanência; responder estado e avisos assinados |
+
+O **celular do administrador** é o mesmo app, em outro papel: cria a turma, publica a grade
+(assinada) e calibra o limiar de 1 m.
+
+```
+Âncora ──Bluetooth (anúncio)──▶ Celular ──MQTT/TLS──▶ Broker ──▶ Servidor
+                                   ▲                                  │
+                                   └──── estado e avisos assinados ◀──┘
+```
 
 ### Direção do rádio — decisão estrutural
 
-```
-Âncora ──broadcast──▶ Smartphone ──HTTPS──▶ Servidor
-```
-
 A âncora **transmite e nunca escuta** aparelhos. Ela é um farol. Consequências:
 
-- A âncora nunca conhece a identidade de ninguém. Arrancada da parede e com a memória
-  extraída, não revela dado pessoal.
-- Quem mede o sinal é o smartphone (N aparelhos ouvindo 3 faróis escala melhor que
-  1 aparelho varrendo N).
-- A identidade trafega apenas entre aparelho e servidor, por canal cifrado.
+- A âncora nunca conhece a identidade de ninguém. Desligada e com a memória extraída, não
+  revela dado pessoal.
+- Quem mede o sinal é o celular. Um anúncio é ouvido por todos os celulares ao mesmo
+  tempo: **não há limite de celulares por âncora**.
+- A identidade trafega apenas entre celular e servidor, por canal cifrado.
 
-### Malha entre âncoras
+### Produtor e consumidor nos dois sentidos
 
-As 3 âncoras da sala se comunicam por **ESP-NOW** e elegem uma líder, única a falar com
-o gateway por MQTT. Reduz a carga no ponto de acesso a um terço, permite operar em sala
-com Wi-Fi fraco, e reorganiza automaticamente quando a líder falha.
+| | Produz | Consome |
+|---|---|---|
+| **Celular** | heartbeat (assinado, com o token da âncora) | estado e avisos (confere a assinatura do servidor) |
+| **Servidor** | estado e avisos (assinados) | heartbeat (confere assinatura, identidade e token) |
+| **Admin** | turma (assinada) | — |
+
+### Visão: malha entre âncoras
+
+Na sala real, três âncoras ESP32 se comunicariam por **ESP-NOW** e elegeriam uma líder, única
+a falar com o broker. Reduz a carga no ponto de acesso a um terço, permite operar com Wi-Fi
+fraco e reorganiza automaticamente quando a líder falha. Não implementado.
 
 ## 3. Identidade e segurança
 
-### Pareamento — uma vez por semestre
+Quatro jeitos de enganar o sistema, cada um respondido por uma camada:
 
-1. O estudante lê um **QR individual de uso único**, entregue pelo portal acadêmico.
-   Nunca um código único projetado para a turma — a foto circula.
-2. O aplicativo gera um par de chaves **dentro do hardware seguro** (Secure Enclave no
-   iOS, Keystore no Android). A chave privada nunca sai do cofre.
-3. O servidor grava o vínculo `aluno_id ↔ chave_pública` e queima o token.
+| Ataque | Camada | Como |
+|---|---|---|
+| **Ler** as mensagens no caminho | TLS | broker só aceita 8883 (MQTT/TLS) e 8084 (`wss://`) |
+| **Entrar** no broker sem ser do sistema | autenticação MQTT | um usuário e senha por papel: `presenca-servidor`, `presenca-app` |
+| **Falar em nome de outro** | assinatura por dispositivo | envelope `seguranca.envelope.v1`, Ed25519 sobre `tópico + carga` |
+| Dizer que **está na sala estando em casa** | token da âncora | HMAC que só vale na janela de 12 s atual |
 
-**Regra obrigatória: uma chave ativa por estudante.** Parear um aparelho novo revoga o
-anterior. Sem isso, basta parear um aparelho barato e deixá-lo escondido na sala.
+A assinatura é necessária mesmo com senha porque a senha do app vai **dentro do APK**: quem o
+descompilar a obtém. A senha separa "de dentro" de "de fora"; a assinatura separa um estudante
+do outro.
 
-### Quando exige novo pareamento
+### Identidade do estudante
 
-| Evento | Repareia? |
-|---|---|
-| Reinício, atualização de app ou de sistema, troca de Wi-Fi ou de chip | Não |
-| Desinstalação do app, restauração de fábrica, aparelho novo | Sim |
-| Android: reset de biometria/PIN pode invalidar o Keystore | Às vezes |
+- Na primeira abertura, o app gera uma chave **Ed25519** a partir de 32 bytes aleatórios e a
+  guarda no armazenamento seguro do Android (`expo-secure-store`, cifrado pelo Keystore).
+  A chave privada nunca sai do aparelho.
+- O **pseudônimo é o hash da chave pública**: `aluno = "tok-" + SHA-256(chave)[0..8]`.
+  Não há cadastro: o servidor recalcula o hash da chave que veio no envelope.
+- Nunca se usa MAC, IMEI ou nome.
 
-### Prova de presença
+### Identidade dos outros dispositivos
 
-A âncora transmite um **token rotativo** (HMAC sobre contador de tempo, renovado a cada
-10–15 s). O aparelho só devolve o token válido se realmente o ouviu — prova de recepção,
-logo de proximidade física. Exigir os tokens das **três** âncoras simultaneamente
-reforça.
+| Dispositivo | Como prova quem é | Quem confere | Se falhar |
+|---|---|---|---|
+| Celular do estudante | assina cada heartbeat; o nome é o hash da chave | servidor | `SEM ASSINATURA`, `ASSINATURA FALSA`, `IDENTIDADE TROCADA` |
+| Âncora | token HMAC que só ela e o servidor sabem gerar | servidor | `TOKEN VENCIDO` |
+| Servidor | assina estado e avisos; a chave pública vem fixada no app | celular | mensagem ignorada e contada como falsa |
+| Administrador | assina a turma; o estudante guarda a chave no pareamento | celular do estudante | *"Turma recusada"* |
 
-O heartbeat é **assinado** com a chave privada; o servidor verifica com a pública. O que
-trafega é assinatura, não identificador permanente.
+### Pareamento
+
+O estudante entra na turma **uma vez**, digitando o código de 6 caracteres ou lendo o QR que o
+administrador mostra na primeira aula. Nesse momento o app guarda a chave pública do
+administrador (confiança no primeiro uso); daí em diante só aceita turma assinada por ela.
+Depois disso, nenhuma ação do estudante por aula.
+
+### Prova de presença — o token da âncora
+
+```text
+token   = HMAC-SHA256( segredo da âncora , "anc-pc-1|" + ⌊hora ÷ 12 s⌋ )[0..3]
+anúncio = "PRS1" | nº da âncora | token (4 bytes)     — empresa 0xFFFF (reservada para testes)
+```
+
+Só a âncora e o servidor têm o segredo e usam o mesmo relógio, então calculam o mesmo token
+sem conversar. O celular só **repassa** o que ouviu; não consegue inventar. O servidor aceita
+a janela atual, a anterior e a seguinte (folga de relógio); para heartbeat que esperou na fila
+durante queda de rede, até 4 janelas para trás (48 s).
+
+### Os segredos
+
+Ficam em `segredos.json` (fora do git). `python configurar.py` gera o segredo da âncora, a
+chave do servidor e o `app/src/lib/segredos.ts` que vai dentro do APK. Trocou senha ou chave:
+rodar de novo e gerar APK novo.
 
 ### Ameaças e tratamento
 
-| Ameaça | Tratamento | Resolvido? |
+| Ameaça | Tratamento | Situação |
 |---|---|---|
-| Forjar RSSI de casa | Token rotativo — impossível adivinhar | ✅ |
-| Reusar captura de outro dia | Nonce da sessão no token | ✅ |
-| Conluio em massa (todos deixam o celular) | Sem defesa técnica no escopo atual | ❌ residual |
-| Relay do token por mensagem a quem está fora | Janela de 10–15 s torna manual e trabalhoso | ⚠️ parcial |
-| Emprestar o aparelho ao colega | Variância de acelerômetro + revisão do professor | ⚠️ parcial |
-| Mentir nível de bateria para forjar "morreu" | Coerência da curva de descarga (é lenta e monotônica) | ✅ |
-| Aparelho pareado abandonado na sala | Uma chave ativa por estudante + detecção de imobilidade | ✅ |
+| Ler o tráfego no Wi-Fi da faculdade | TLS obrigatório | ✅ testado |
+| Conectar no broker sem senha | autenticação por papel | ✅ testado |
+| Heartbeat sem assinatura, ou assinado dizendo ser outro aluno | envelope + pseudônimo = hash da chave | ✅ testado |
+| Mover uma mensagem válida para o tópico de outro aluno | a assinatura cobre o tópico | ✅ testado |
+| Forjar heartbeat de casa | token da âncora | ✅ testado |
+| Reusar captura de outro momento | token vence em 12 s | ✅ testado |
+| Estado ou aviso falso para o celular | assinatura do servidor, chave fixada no app | ✅ testado |
+| Turma falsa (ex.: limiar de 1 m em −100 dBm) | assinatura do administrador | ✅ testado |
+| Senha do app extraída do APK | publica, mas é recusado; ainda lê pseudônimos | ⚠️ falta ACL |
+| Celular com root extraindo a chave | chave fica no armazenamento seguro, não dentro do chip | ⚠️ limite declarado |
+| Relay do token por alguém na sala para quem está fora | janela de 12 s torna manual e trabalhoso | ⚠️ parcial |
+| Emprestar o aparelho ao colega | revisão do professor | ⚠️ parcial |
+| Aparelho pareado abandonado na sala | regra "uma chave ativa por estudante" | ❌ não implementada |
+| Conluio em massa (todos deixam o celular) | sem defesa técnica no escopo atual | ❌ residual |
 
 ## 4. Protocolo
 
-### Heartbeat do aparelho → servidor
+Contratos em [`marco-03/contrato/v1/`](../marco-03/contrato/v1/), validados pelo servidor com
+JSON Schema. Campo desconhecido é rejeitado.
+
+| Mensagem | De → para | Tópico (`ufg/ssu/presenca/alany/m3/…`) |
+|---|---|---|
+| `presenca.heartbeat.v2` | celular → servidor | `sala-pc/heartbeat` |
+| `presenca.estado.v1` | servidor → celular (retida) | `sala-pc/estado/<aluno>` |
+| `presenca.aviso.v1` | servidor → celular | `sala-pc/aviso/<aluno>` |
+| `presenca.turma.v1` | admin → celulares (retida) | `turma/<código>` |
+
+Toda mensagem viaja dentro de um `seguranca.envelope.v1`:
 
 ```json
 {
-  "sessao": "<nonce da aula>",
-  "aluno": "<token>",
-  "ts": 1758000000,
-  "bateria": { "nivel": 63, "carregando": false },
-  "imu": { "variancia": 0.042 },
-  "ancoras": [
-    { "id": "esp32-204-A", "rssi": -68, "token": "<token rotativo ouvido>" },
-    { "id": "esp32-204-B", "rssi": -81, "token": "..." },
-    { "id": "esp32-204-C", "rssi": -77, "token": "..." }
-  ]
+  "eventType": "seguranca.envelope.v1",
+  "de": "tok-10ba682c",
+  "chavePublica": "d04ab232…8737",
+  "carga": "{\"eventType\":\"presenca.heartbeat.v2\", …}",
+  "assinatura": "d102ad2b…a405"
 }
 ```
 
-Assinado com a chave privada do aparelho. O carimbo de tempo que **vale** é o do
-servidor; `ts` do aparelho é informativo e nunca fonte de verdade.
+### Heartbeat (carga)
+
+```json
+{
+  "eventType": "presenca.heartbeat.v2",
+  "eventId": "cel-8ad1#<bootId>#42",
+  "deviceId": "cel-8ad1",
+  "entityId": "sala-pc",
+  "aluno": "tok-10ba682c",
+  "bootId": "<sorteado a cada abertura do app>",
+  "eventTimeMs": 1760600000000,
+  "sequence": 42,
+  "value": -58.5,
+  "unit": "dBm",
+  "state": "DENTRO_ALCANCE",
+  "ancoras": [ { "id": "anc-pc-1", "rssi": -58.5, "token": "45cb0d0e" } ],
+  "medidoEmMs": 1760600000000
+}
+```
+
+`eventId = deviceId#bootId#sequence` permite ao servidor deduplicar, recolocar na ordem o que
+chegou atrasado e contar o que se perdeu. O `bootId` existe porque reiniciar o app zera a
+sequência. O carimbo de tempo que **vale** é o do servidor; o do celular é informativo.
+
+O heartbeat leva até 3 âncoras, cada uma com o seu token, e o servidor confere cada token
+contra o segredo daquela âncora: está pronto para a sala com três âncoras.
 
 ### Cadência
 
-| Plataforma | Mecanismo | Cadência |
+| | Projeto (sala real) | Demonstração |
 |---|---|---|
-| **Android** | Foreground Service com notificação persistente | 60–90 s |
-| **iOS** | Monitoramento de região (o sistema acorda o app na entrada e na saída) | Orientado a evento |
+| Heartbeat | 60–90 s | 500 ms |
+| Amostra de RSSI | contínua | mediana dos últimos 2 s |
+| Âncora sumiu | — | 4 s sem anúncio |
 
-Consequência de projeto: a permanência é derivada do **intervalo entre eventos**, não de
-uma contagem de amostras periódicas. Só assim os dois sistemas convergem.
+A permanência é derivada do **intervalo entre eventos**, não de uma contagem de amostras.
+Com a rede fora, o app retém até 60 heartbeats (30 s) e os envia marcados como `bufferizado`.
 
-### Sessão
+### Sessão e janela da aula
 
-O gateway publica `sessao/iniciar` 5 minutos antes da aula e `sessao/encerrar` ao fim.
-A âncora **permanece energizada e conectada** o tempo todo — apenas o sensoriamento é
-que liga e desliga. Motivos: mudança de agenda propaga na hora, sem latência de boot
-(2–10 s para reassociar Wi-Fi), e âncora quebrada é detectada com antecedência.
+O app só mede e envia **durante uma aula**: um período da grade da turma (dia, início e fim)
+ou uma aula de demonstração iniciada pelo administrador agora. Fora disso, fica inerte — é o
+duty cycling que importa, porque a bateria finita é a do celular. A âncora fica ligada o
+tempo todo.
 
-O duty cycling que importa é no aparelho do estudante, onde a bateria é finita: o app
-fica inerte fora da janela `[início − 5 min, fim]`.
+O servidor mantém **uma sessão por aluno**, aberta no primeiro heartbeat. Um boot novo no
+meio da aula continua a mesma sessão; um boot novo depois de a aula terminar abre a seguinte.
 
 ## 5. Localização
 
-### Modelo de propagação
+### Hoje: uma âncora, limiar calibrado a 1 m
+
+Com uma única âncora não há trilateração. A regra é **"na sala" = até 1 m do notebook**:
+
+1. O administrador põe o celular a 1 m da âncora e calibra (8 s de medição). O RSSI medido
+   vira o `limiar1mDbm` da turma, publicado assinado.
+2. O celular do estudante filtra o RSSI (mediana de 2 s, mínimo de 3 amostras) e decide a
+   região com **histerese de 5 dB**: entra em `DENTRO_ALCANCE` acima do limiar e só volta a
+   `FORA_ALCANCE` 5 dB abaixo. Sem calibração, a região fica `INDETERMINADA`.
+3. O servidor aceita a região como a decisão inteira.
+
+É o "raio" que o projeto rejeita para a sala real (seção 10). Aqui é a **simplificação
+declarada do protótipo**, coerente com uma âncora só.
+
+### Visão: três âncoras, trilateração e polígono
 
 ```
-RSSI = A − 10 · n · log₁₀(d)
+RSSI = A − 10 · n · log₁₀(d)        A = RSSI a 1 m (calibrado) · n ≈ 2,2 (estimado)
 ```
 
-`A` ≈ −45 dBm a 1 m; `n` entre 2 e 4 conforme obstrução. Usado no **simulador**; na
-operação real o caminho é inverso (RSSI → distância estimada).
+Três distâncias estimadas produzem uma posição, e o teste é **pertinência ao polígono da
+sala**, não distância a um ponto. Um raio é um círculo, uma sala é um retângulo com paredes, e
+rádio atravessa parede: apertando o raio perde-se quem está no fundo; abrindo, pega-se a sala
+vizinha. Ajustar o número não converge.
 
-### Trilateração e polígono
-
-Três distâncias estimadas produzem uma posição. O teste é **pertinência ao polígono da
-sala**, não distância a um ponto.
-
-> Razão da decisão: um raio é um círculo, uma sala é um retângulo com paredes, e rádio
-> atravessa parede. Não existe valor de raio que coincida com a sala — apertando, perde
-> quem está no fundo; abrindo, pega a sala vizinha. Ajustar o número não converge.
+O código já existe: `permanencia.py` trilatera e testa o polígono sempre que a sala tem mais
+de uma âncora configurada (`config.json` → `sala.ancoras`, `sala.poligono`). Foi exercitado no
+Marco 2 com RSSI sintético (três potenciômetros no Wokwi), incluindo o caso do sinal forte na
+sala vizinha.
 
 ### Calibração
 
-Os limiares são definidos **em dBm, obtidos por levantamento na sala real** (quatro
-cantos, porta, corredor, sala vizinha) — nunca em metros. Metro é apenas a forma de
-explicar o limiar a uma pessoa.
+Os limiares são definidos **em dBm, medidos no local** — nunca em metros. Metro é apenas a forma
+de explicar o limiar a uma pessoa. A medição da curva real distância × RSSI está pendente
+(`marco-03/medicoes/distancia.csv` → `ajustar_distancia.py`).
 
 ## 6. Máquina de estados e regras de permanência
+
+Toda a regra está em [`permanencia.py`](../marco-03/servidor/permanencia.py), um módulo sem
+rede e sem relógio, coberto por testes.
+
+### Classificação de cada heartbeat
+
+| Região do celular | (visão) Posição | Classe |
+|---|---|---|
+| `FORA_ALCANCE` | — | fora |
+| `DENTRO_ALCANCE` | dentro do polígono | dentro |
+| `DENTRO_ALCANCE` | fora do polígono | fora (sinal forte na sala vizinha) |
+| `INDETERMINADA` ou âncora faltando | — | neutro: não há base para decidir |
+
+Com uma âncora só, a coluna de posição não se aplica: `DENTRO_ALCANCE` é dentro.
 
 ### Estados
 
 | Estado | Relógio | Transição de saída |
 |---|---|---|
-| `FORA` | parado | → `PRESENTE` com RSSI > −70 dBm por 30 s |
-| `PRESENTE` | **contando** | → `AUSENCIA_TOLERADA` com RSSI < −85 dBm por 30 s |
+| `FORA` | parado | → `PRESENTE` com "dentro" sustentado por 30 s |
+| `PRESENTE` | **contando** | → `AUSENCIA_TOLERADA` com "fora" sustentado por 30 s |
 | `AUSENCIA_TOLERADA` | contando provisoriamente | → `PRESENTE` se retornar enquanto houver orçamento; senão → `FORA`, estornando o tempo desde o início real da ausência |
-| `PAUSA_PROGRAMADA` | congelado | Entra e sai pelo relógio da agenda, independente de sinal |
+| `PAUSA_PROGRAMADA` | congelado | *visão*: entra e sai pelo relógio da agenda (intervalo da aula) |
 
-A dupla de limiares (−70 / −85 dBm) é **histerese**: a faixa morta entre eles impede
-oscilação de quem está sentado na borda do alcance.
-
-`motivo` é **atributo do evento de ausência**, não estado: `saiu | bateria | app_morto |
-desconhecido`. Decide se a ausência consome orçamento, vai para revisão, ou pune.
+Neutro interrompe a contagem de persistência. A entrada e a saída valem **desde o início real**
+da condição, não desde o momento em que ela foi confirmada.
 
 ### Parâmetros
 
-| Parâmetro | Valor | Razão |
-|---|---|---|
-| Limiar de entrada | > −70 dBm por 30 s | Histerese |
-| Limiar de saída | < −85 dBm por 30 s | Histerese |
-| **Orçamento de ausência creditada** | **15 min por sessão** | Limite único. Cobre banheiro, café e telefonema, e limita o total em vez do evento |
-| Avisos ao estudante | 10 min (2/3) e 13 min (87 %) | Chegam enquanto ainda cabe reação |
-| Requalificação no retorno | `min(30 min, tempo restante da aula)` | Impede reabrir crédito aparecendo 20 s |
-| Pausa programada | Da agenda (+5 min de margem) | Congela para a turma inteira |
-| Aprovação por aula-hora | ≥ 75 % de 50 min = 37,5 min | Converte contínuo em booleano legal |
+Os valores são os reais do projeto e ficam em `servidor/config.json`; na demonstração são
+divididos pela **escala** (padrão 30: 1 s de demonstração = 30 s de aula).
+
+| Parâmetro | Projeto | Demonstração (÷30) | Razão |
+|---|---|---|---|
+| Persistência de entrada e saída | 30 s | 1 s | Evita oscilação na borda |
+| **Orçamento de ausência creditada** | **15 min por sessão** | 30 s | Cobre banheiro, café e telefonema, e limita o total em vez do evento |
+| Avisos ao estudante | 10 min (2/3) e 13 min (87 %) | 20 s e 26 s | Chegam enquanto ainda cabe reação |
+| Requalificação no retorno | `min(30 min, restante da aula)` | `min(60 s, restante)` | Impede reabrir crédito aparecendo 20 s |
+| Aula | 50 min | 100 s | |
+| Aprovação por aula-hora | ≥ 75 % (37,5 min) | 75 % | Converte contínuo em booleano legal |
 
 ### Regras invioláveis
 
 1. **O acumulador é monotônico.** Congela e retoma; nunca zera. Quem assistiu 90 de 100
-   minutos e saiu no fim soma 90.
-2. **A permanência é calculada retroativamente sobre o log**, nunca incrementada ao
-   vivo. Só se descobre que a ausência começou às 10h42 dez minutos depois — e o crédito
-   da requalificação só se resolve 30 minutos após o retorno.
-3. **O orçamento é por sessão, não por evento.** Sem isso, sair repetidamente por 29 min
-   sai de graça: 60 min reais rendem 89 % de presença computada.
-4. **`EventoSensor` e `Presenca` são tabelas distintas.** A primeira é fato bruto; a
-   segunda é inferência, e inferência erra. Guardar o porquê da decisão é o que permite
-   auditar a reclamação do estudante.
-5. **Existe override manual do professor.** Todo sistema de inferência precisa de válvula
-   de escape humana, ou um erro de RSSI vira reprovação por falta.
+   minutos e saiu no fim soma 90. O que ainda pode mudar aparece em separado, como
+   `provisorio`.
+2. **A permanência é recalculada sobre o log inteiro** a cada heartbeat, nunca incrementada ao
+   vivo. Só se descobre que a ausência começou às 10h42 depois — e o crédito da requalificação
+   só se resolve após o retorno sustentado.
+3. **O orçamento é por sessão, não por evento.** Sem isso, sair repetidamente por 29 min sai de
+   graça.
+4. **Fato bruto e inferência são guardados separados.** O servidor grava cada heartbeat aceito
+   com a classificação e o que derivou dele (`recebidos.log`): guardar o porquê da decisão é o
+   que permite auditar a reclamação do estudante.
+5. **Existe override manual do professor** (*visão*, com o painel). Todo sistema de inferência
+   precisa de válvula de escape humana.
 
-## 7. Notificações
+## 7. Notificações (atuação)
 
-O aviso só **atua** se chegar enquanto ainda cabe reação. Notificação após a falta
-consolidada é informação; antes, é atuação — e é o que fecha o laço ciber-físico.
+O aviso só **atua** se chegar enquanto ainda cabe reação. Notificação depois da falta
+consolidada é informação; antes, é atuação — e é o que fecha o laço ciber-físico: o estudante
+volta e altera a própria posição, que é a grandeza medida.
 
 | Momento | Mensagem |
 |---|---|
@@ -218,33 +353,52 @@ consolidada é informação; antes, é atuação — e é o que fecha o laço ci
 | Limite esgotado | *"O tempo parou de ser contabilizado às 10h42."* |
 | Fim da aula | *"Você acumulou 78 % desta aula."* |
 
-Nada é notificado fora desses quatro momentos. Se o estudante ignorar o aviso, o sistema
-não insiste — insistir é ruído, e ele não tem autoridade sobre a decisão dele.
+Cada aviso tem `avisoId` único (o celular não repete) e vem **assinado pelo servidor**. O celular
+só atua — vibra, mostra notificação local e o cartão na tela — se a assinatura conferir com a
+chave do servidor fixada no app. Nada é notificado fora desses quatro momentos.
 
 ## 8. Modelo de dados
 
+### Hoje
+
+| Onde | O que guarda |
+|---|---|
+| Celular (SQLite) | turmas (código, nome, sala, grade, limiar de 1 m, chave do admin), aulas, avisos recebidos, ajustes |
+| Celular (armazenamento seguro) | chave Ed25519 do aparelho, PIN do administrador |
+| Broker (mensagens retidas) | a turma publicada; o último estado de cada aluno |
+| Servidor (`recebidos.log`, JSON por linha) | cada heartbeat aceito, com carimbo do servidor, sessão, classe e derivado |
+| Servidor (memória) | sessões por aluno, eventos já vistos |
+
+### Visão (painel do professor)
+
 | Entidade | Campos que importam |
 |---|---|
-| `Sala` | Identificadores das 3 âncoras, polígono, BSSIDs que a cobrem |
-| `Disciplina` / `Turma` | Vínculo professor ↔ estudantes |
-| `AulaAgendada` | Dia, início, fim, **início e fim do intervalo**, sala |
-| `SessaoDeAula` | Instância real do dia (pode ser cancelada ou mudar de sala) |
-| `Matricula` | Estudante ↔ turma, chave pública ativa |
-| `EventoSensor` | Bruto: timestamp, âncora, identificador, RSSI, origem. **Retenção curta (dias)** |
-| `Presenca` | Derivado: estado final, janelas de ausência, motivo, **como foi decidido** |
+| `Sala` | identificadores das âncoras, polígono |
+| `Turma` / `AulaAgendada` | vínculo professor ↔ estudantes; dia, início, fim, intervalo, sala |
+| `SessaoDeAula` | instância real do dia (pode ser cancelada ou mudar de sala) |
+| `Matricula` | estudante ↔ turma, **uma** chave pública ativa |
+| `EventoSensor` | bruto, retenção curta (dias) |
+| `Presenca` | derivado: estado final, janelas de ausência, **como foi decidido** |
 
-**Nunca materializar nem persistir o grafo de colocalização** (quem esteve perto de
-quem). É o dado mais sensível que o sistema obteria de graça, e ele não é necessário.
+**Nunca materializar nem persistir o grafo de colocalização** (quem esteve perto de quem). É o
+dado mais sensível que o sistema obteria de graça, e ele não é necessário.
 
 ## 9. Restrições de plataforma
 
-O aplicativo do estudante **precisa ser nativo**. Navegador não serve — e o motivo
-principal encerra o assunto sozinho: **não existe API de RSSI ou BSSID em nenhum
-navegador**. Somam-se: Web Bluetooth exige gesto por conexão e não existe no iOS; página
-em segundo plano não executa; WebAuthn exige gesto do usuário a cada assinatura.
-
-O **painel do professor é web**, e deve ser: é interativo, em primeiro plano, e não
-sensoria nada. A assimetria é limpa — quem sensoria precisa de nativo, quem consulta não.
+- O app do estudante **precisa ser nativo**: não existe API de RSSI em navegador algum. Por
+  isso ele roda como **APK**, não no Expo Go (que não tem Bluetooth).
+- O Android esconde anúncios de farol de apps que declaram não usar Bluetooth para localização;
+  o plugin `ble-sem-never-for-location.js` ajusta isso.
+- O JavaScript pausa em segundo plano: durante a aula a tela fica acesa. Na versão de
+  produção, um serviço em primeiro plano (Android) faria esse papel.
+- Âncora e servidor precisam de relógio certo para o token (hoje são o mesmo notebook; no
+  ESP32, NTP).
+- O broker EMQX gratuito deixa passar **~11 mensagens por segundo por conexão**. O servidor
+  sozinho processa ~2.400 msg/s. Com heartbeat de 60 s numa aula real, ≈ 650 celulares por
+  conexão do servidor; acima disso, assinatura compartilhada (`$share/…`) com várias cópias do
+  servidor.
+- O **painel do professor seria web**: é interativo, em primeiro plano, e não sensoria nada.
+  Quem sensoria precisa de nativo, quem consulta não.
 
 ## 10. Alternativas rejeitadas
 
@@ -252,46 +406,72 @@ Registradas para não serem re-propostas.
 
 | Alternativa | Por que foi rejeitada |
 |---|---|
-| **Celular do professor varrendo os alunos** | Não escala (1 aparelho × N alunos), consome a bateria do dispositivo crítico, e o iOS restringe severamente o scan em segundo plano |
-| **Endereço MAC como identidade** | Randomizado por SSID desde Android 10 / iOS 14; muda ao esquecer a rede; IMEI inacessível; ID de anúncio zerável pelo usuário |
-| **GPS / localização do sistema operacional** | 10–50 m de erro dentro de prédio, quando fixa. Não distingue sala de sala. Background estrangulado nas duas plataformas |
-| **P2P puro (alunos atestando uns aos outros)** | A turma inteira tem incentivo alinhado para mentir — a multidão é o adversário. Além de vulnerável a Sybil sem raiz de confiança. Viável apenas **ancorado**, com 1 salto |
-| **QR a cada aula** | Atrito em 100 % das aulas para pegar fraude rara, e previsível — o estudante organiza a fraude em torno do horário. Substituído por pareamento único + auditoria |
-| **Limiar em metros (15 m, 20 m…)** | RSSI não mede distância: ±5–10 m de erro, variando com bolso, corpo e orientação. Ajustar o número não converge; o problema é círculo × polígono |
-| **Detectar bateria morta pelo formato da queda de RSSI** | Sair de uma sala leva ~10 s; com amostragem de 60–90 s não se captura curva alguma. Substituído por nível de bateria no heartbeat, que é trivial e confiável |
-| **Zerar o acumulador ao sair** | Perverso: quem assistiu 90 de 100 min perderia tudo. O acumulador pausa |
-| **Tolerância por evento em vez de orçamento** | Explorável por ciclos: 30 min dentro / 29 min fora, repetidamente |
-| **Sensores de CO₂, climatização e iluminação** | Fechariam o laço ciber-físico por atuação física, mas dobram o escopo. A notificação ao estudante fecha o mesmo laço sem hardware novo |
-| **Aplicativo web / PWA** | Sem API de RSSI ou BSSID em navegador algum |
-| **802.1X / RADIUS (sem aplicativo)** | Rota legítima e sem software no aparelho, mas perde a precisão do polígono, o IMU e o controle da amostragem, e depende da TI liberar os logs |
+| **Celular do professor varrendo os alunos** | Não escala (1 aparelho × N alunos), consome a bateria do dispositivo crítico, e o iOS restringe o scan em segundo plano |
+| **Âncora escutando os celulares** | A âncora passaria a saber quem está perto. `escutar.py` existe só como medição, fora do sistema |
+| **Endereço MAC como identidade** | Randomizado por rede desde Android 10 / iOS 14; IMEI inacessível; ID de anúncio zerável |
+| **Identidade por cadastro no servidor** | Desnecessária: o pseudônimo é o hash da chave pública e o servidor o recalcula |
+| **GPS / localização do sistema** | 10–50 m de erro dentro de prédio. Não distingue sala de sala |
+| **P2P puro (alunos atestando uns aos outros)** | A turma inteira tem incentivo alinhado para mentir. Viável apenas ancorado |
+| **QR a cada aula** | Atrito em 100 % das aulas para pegar fraude rara. Substituído por pareamento único + token da âncora |
+| **Limiar em metros como regra da sala real** | RSSI não mede distância: ±5–10 m de erro. O problema é círculo × polígono. (Usado hoje só porque há uma âncora) |
+| **Wi-Fi do celular como sinal** | A força satura em torno de −55 dBm perto do roteador: não distingue 1 m de 5 m |
+| **ESP32 simulando o celular do estudante** | Usado no Marco 2 (Wokwi). O professor pediu o celular de verdade; o ESP32 volta como âncora |
+| **Broker público (`broker.hivemq.com`)** | Sem senha: qualquer um lê e publica. Demonstrado em `ataques.py publico` |
+| **HiveMQ Cloud** | Deixou de ter plano gratuito. EMQX Cloud Serverless dá TLS, senha e ACL de graça, limite de gasto US$ 0 |
+| **Só senha, sem assinatura** | A senha do app vai dentro do APK; não separa um estudante do outro |
+| **Token da âncora sorteado** | Qualquer um inventaria. HMAC com segredo compartilhado com o servidor |
+| **Zerar o acumulador ao sair** | Perverso: quem assistiu 90 de 100 min perderia tudo |
+| **Tolerância por evento em vez de orçamento** | Explorável por ciclos: 30 min dentro / 29 min fora |
+| **Sensores de CO₂, climatização e iluminação** | Dobram o escopo. A notificação ao estudante fecha o laço sem hardware novo. (CO₂ explorado no Marco 2, fora do sistema atual) |
+| **Aplicativo web / PWA** | Sem API de RSSI em navegador |
+| **802.1X / RADIUS (sem aplicativo)** | Sem software no aparelho, mas perde a precisão e depende da TI liberar os logs |
 
 ## 11. Questões em aberto
 
-- [ ] Calibração empírica dos limiares em dBm numa sala real
-- [ ] Verificar se o Wokwi suporta BLE no ESP32 de forma utilizável (suporte limitado)
-- [ ] Ataque de relay do token permanece residual
-- [ ] Empréstimo de aparelho é mitigado, não resolvido
+- [ ] Três âncoras físicas (ESP32) e a malha ESP-NOW; gravar `esp32-ancora.ino` em placa
+- [ ] Medição real da curva distância × RSSI e ajuste do expoente
+- [ ] ACL por tópico no EMQX (cada celular só publica no próprio tópico)
+- [ ] Regra "uma chave ativa por estudante" (exige matrícula no servidor)
+- [ ] Painel do professor, override manual e pausa programada
+- [ ] Serviço em primeiro plano no Android, para medir com a tela apagada
+- [ ] Relay do token e empréstimo de aparelho continuam parciais; conluio em massa, residual
 - [ ] Integração com o sistema acadêmico da instituição
-- [ ] Definir se o painel do professor exibe permanência contínua ou já discretizada
 
-## 12. Ambiente de simulação
+## 12. Ambiente de execução e testes
 
-O Wokwi **não simula propagação de rádio** — não há RSSI, nem distância, nem celular.
-Simula o chip, os periféricos e a rede (via `Wokwi-GUEST`, com internet real, o que faz
-MQTT funcionar).
-
-Divisão consequente:
-
-| Peça | Onde |
+| Peça | Onde roda |
 |---|---|
-| Firmware da âncora: beacon, token rotativo, malha, saúde | Wokwi (um projeto por âncora, mesmo broker) |
-| Estudante emitindo heartbeat com RSSI sintético | Simulador em software — permite 40 estudantes com trajetórias e ruído |
-| Trilateração, polígono, máquina de estados | Backend |
+| Âncora | notebook com Bluetooth (`python ancora.py`) |
+| Servidor | o mesmo notebook (`python servidor.py`, MQTT sobre `wss://` porta 8084) |
+| Broker | EMQX Cloud Serverless |
+| Estudante e administrador | celulares Android com o APK *Presença M3* |
+| Muitos estudantes | `ataques/carga.py`: celulares simulados, cada um com a própria chave, assinando de verdade |
 
-**Bancada de demonstração:** três potenciômetros nas ADCs da âncora, cada um simulando
-um RSSI. Gira-se o botão e o painel mostra o ponto atravessar a parede e o relógio de
-presença congelar.
+Redes que bloqueiam 8883/8084: hotspot do celular. `servidor/testar_rede.py` diz se a rede
+alcança o broker.
 
-**Armadilha:** o relógio do Wokwi não anda na velocidade real e oscila com a carga.
-Todos os limiares devem ser constantes de configuração, testados com valores comprimidos
-(30 min → 30 s).
+**Tempos comprimidos.** Todos os limiares são constantes de configuração com o valor real,
+divididos pela escala. A demonstração de 100 s equivale a uma aula de 50 min.
+
+**Testes:** `python -m pytest testes -q` em `marco-03/servidor` (49) e `npm test` em
+`marco-03/app` (22, incluindo a assinatura conferida entre JavaScript e Python). Ataques
+demonstráveis: `python ataques.py senha | forjar | estado | turma | publico --ws`.
+
+**Wokwi (Marco 2).** O Wokwi não simula propagação de rádio. No Marco 2 o aparelho do
+estudante era um ESP32 com três potenciômetros fazendo o papel do RSSI das três âncoras — é onde
+a trilateração e o polígono foram exercitados.
+
+## 13. O que mudou desde a proposta
+
+| Proposta (Atividades 01 e 02) | Hoje |
+|---|---|
+| 3 âncoras ESP32 com malha ESP-NOW | 1 âncora: o notebook (ESP32 pronto em código, sem placa) |
+| Trilateração + polígono | Limiar calibrado a 1 m; trilateração pronta no servidor para 3 âncoras |
+| Heartbeat por HTTPS | MQTT sobre TLS (EMQX Cloud) |
+| Android e iOS | Android (APK) |
+| Gateway de borda abrindo e encerrando sessões | A grade da turma (publicada pelo admin) define a janela; o servidor abre uma sessão por aluno |
+| QR individual de uso único | Código/QR da turma + chave do aparelho; pseudônimo = hash da chave |
+| Chave no Secure Enclave / Keystore | Chave Ed25519 no armazenamento seguro (cifrado pelo Keystore) |
+| Bateria e acelerômetro no heartbeat | Fora do heartbeat atual |
+| Token rotativo a cada 10–15 s com nonce da sessão | Token HMAC por janela de 12 s |
+| Painel web do professor | Painel no terminal do servidor; web é visão |

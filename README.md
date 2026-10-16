@@ -25,42 +25,55 @@ A chamada consome de 3 a 5 horas-aula por semestre, mede um instante arbitrário
 da aula inteira e é trivialmente fraudável. Este sistema troca **presença** (binária,
 medida num instante) por **permanência** (contínua, acumulada ao longo da aula).
 
-## Como funciona
+## Como funciona hoje
 
-1. **Três âncoras ESP32** ficam fixas na sala, transmitindo um sinal identificado e um
-   token que se renova a cada 10–15 segundos. Elas formam uma malha ESP-NOW entre si e
-   elegem uma líder, que é a única a falar com o gateway.
-2. **O aplicativo do estudante** ouve as três âncoras, mede a intensidade de sinal de
-   cada uma e envia ao servidor um pacote assinado. As âncoras nunca sabem quem está na
-   sala — a identidade trafega apenas entre aparelho e servidor, cifrada.
-3. **O servidor** trilatera a posição, testa se ela está dentro do polígono da sala e
-   alimenta uma máquina de estados que acumula o tempo de permanência.
-4. **Quando uma ausência passa da metade do limite**, o sistema notifica o estudante —
-   *"você está fora há 10 minutos, seu limite é 15"*. É a notificação que fecha o laço:
-   o estudante retorna e altera a própria posição, que é a grandeza medida.
-5. **Ao fim da aula**, o professor recebe a lista preenchida e uma fila curta de
-   exceções para revisar.
+![As quatro peças do sistema](marco-03/documentacao/imagens/arquitetura.svg)
+
+1. **A âncora** — hoje, um notebook — anuncia por Bluetooth o seu identificador e um
+   **token que muda a cada 12 s**, calculado com um segredo que só ela e o servidor
+   conhecem. Ela só transmite: nunca sabe quem está na sala.
+2. **O app do estudante** (Android) ouve a âncora, mede a intensidade do sinal e decide se
+   está **a até 1 m** dela, contra um limiar que o administrador calibrou. A cada batida,
+   envia ao servidor um heartbeat **assinado** com a chave do próprio aparelho, levando o
+   token que acabou de ouvir.
+3. **O servidor** confere assinatura, contrato, identidade e token; só então alimenta a
+   máquina de estados que acumula o tempo de permanência, com um orçamento de 15 min de
+   ausência por aula.
+4. **Quando uma ausência chega a 10 e a 13 minutos**, o servidor manda um aviso assinado e
+   o celular vibra e notifica — *"fora da sala há 10 min, seu limite é 15"*. É a
+   notificação que fecha o laço: o estudante retorna e altera a própria posição, que é a
+   grandeza medida.
+5. **Ao fim da aula**, cada estudante tem o percentual acumulado; presença é ≥ 75 %.
+
+Tudo passa por MQTT com **TLS e usuário/senha** (EMQX Cloud). O **administrador** usa o
+mesmo app para criar a turma, definir a grade de horários, mostrar o código/QR de entrada
+e calibrar o limiar de 1 m.
 
 ## Decisões de projeto
 
 | Decisão | Motivo |
 |---|---|
-| **Permanência, não presença** | O erro do sistema passa a ser proporcional à falha: três minutos de sensor ruim custam três minutos, não a aula inteira |
-| **Âncora só transmite, nunca escuta** | A infraestrutura da sala não guarda nenhum dado pessoal. Arrancada da parede, não revela nada |
-| **Trilateração com três âncoras** | Rádio não respeita parede. Um raio é um círculo; uma sala é um polígono. Três âncoras permitem testar pertinência ao polígono, não distância a um ponto |
-| **QR lido uma única vez** | Pareia pessoa e chave criptográfica no início do semestre. Depois disso, cerca de vinte aulas sem nenhuma ação do estudante |
-| **Identidade por chave, não por hardware** | MAC é randomizado por rede, IMEI é inacessível, ID de anúncio é zerável. A chave nasce no cofre de hardware do aparelho e só muda quando o aparelho muda |
+| **Permanência, não presença** | O erro do sistema passa a ser proporcional à falha: três minutos de sinal ruim custam três minutos, não a aula inteira |
+| **Âncora só transmite, nunca escuta** | A infraestrutura da sala não guarda nenhum dado pessoal, e não há limite de celulares por âncora |
+| **Token da âncora com HMAC** | Prova que o celular estava ouvindo a âncora *agora*. Heartbeat feito em casa ou repetido depois não tem o token certo |
+| **Identidade por chave, não por hardware** | MAC é randomizado, IMEI é inacessível. O aparelho gera uma chave Ed25519 e o nome do estudante é o hash dela — sem cadastro, sem nome no tráfego |
+| **Toda mensagem assinada** | A senha do app vai dentro do APK; ela separa quem é do sistema, a assinatura separa um estudante do outro. Servidor e admin também assinam |
+| **Entrar na turma uma vez** | Código ou QR na primeira aula. Depois disso, nenhuma ação do estudante por aula |
 | **Orçamento de ausência por sessão** | 15 minutos de tolerância no total da aula, não por evento — senão basta sair repetidamente por pouco tempo |
 | **Avisar antes de punir** | Notificação após a falta consolidada é informação. Antes, é atuação |
-| **Malha ESP-NOW entre âncoras** | Reduz a carga no ponto de acesso a um terço e permite reorganização automática quando um nó falha |
+
+Para a sala real, o desenho prevê **três âncoras ESP32** e **trilateração + polígono da
+sala** em vez do limiar de 1 m — um raio é um círculo, uma sala é um polígono. O servidor
+já trilatera quando há três âncoras; o firmware da âncora ESP32 está pronto, sem placa
+para gravar. Detalhes em [`docs/projeto-tecnico.md`](docs/projeto-tecnico.md).
 
 ## Classificação
 
 | Categoria | Situação |
 |---|---|
 | **Aplicação ubíqua** | ✅ principal — interação implícita, ciência de contexto, infraestrutura invisível |
-| **Internet das Coisas** | ✅ dispositivos conectados, MQTT, processamento remoto |
-| **Rede de sensores** | ✅ medição cooperativa, localização por âncoras, nó móvel, multi-salto |
+| **Internet das Coisas** | ✅ dispositivos conectados, MQTT com TLS, processamento remoto |
+| **Rede de sensores** | ✅ âncora + celulares medindo o sinal + servidor; uma âncora física hoje, três na visão |
 | **Sistema ciber-físico** | ✅ com humano no laço — a notificação atua sobre a posição medida |
 
 Justificativas completas em [`docs/atividade-01.md`](docs/atividade-01.md), item 8.
@@ -74,20 +87,22 @@ quem ao longo do semestre. Ele nunca é materializado nem persistido.
 O compromisso de fundo, registrado no documento: *neste domínio, ubiquidade e privacidade
 são grandezas inversas*. As versões mais invisíveis do sistema — câmera com
 reconhecimento facial, sensor de pressão no piso — dispensariam aplicativo, bateria e
-cooperação. Ubiquidade máxima, consentimento zero. O grupo optou deliberadamente por não
+cooperação. Ubiquidade máxima, consentimento zero. O projeto optou deliberadamente por não
 maximizar a ubiquidade.
 
 ## Organização do repositório
 
 | Pasta / arquivo | Conteúdo |
 |---|---|
-| [`marco-03/`](marco-03/README.md) | **Marco 3 — Segurança.** Canal cifrado (TLS), autenticação MQTT, todo dispositivo provando quem é (assinatura Ed25519 + token HMAC da âncora), atuação e produtor ↔ consumidor nos dois sentidos. Âncora Bluetooth real, app do celular, servidor e testes de ataque e de carga |
-| [`marco-02/`](marco-02/README.md) | Marco 2 — fronteira de comunicação aparelho ↔ servidor por MQTT: produtor ESP32 (Wokwi), servidor Python, contrato versionado e condições de falha |
-| [`docs/projeto-tecnico.md`](docs/projeto-tecnico.md) | Especificação completa: parâmetros, protocolo, máquina de estados, alternativas rejeitadas |
+| [`marco-03/`](marco-03/README.md) | **Sistema atual (Marco 3 — Segurança).** Âncora Bluetooth (notebook), app Android do estudante e do admin, servidor de permanência, contrato, ataques e teste de carga. Canal cifrado, autenticação MQTT e todo dispositivo provando quem é |
+| [`marco-02/`](marco-02/README.md) | Marco 2 — fronteira aparelho ↔ servidor por MQTT, com o aparelho simulado por um ESP32 no Wokwi (três potenciômetros no papel das três âncoras), contrato versionado e condições de falha |
+| [`docs/projeto-tecnico.md`](docs/projeto-tecnico.md) | Especificação: o que está construído, parâmetros, protocolo, máquina de estados, segurança, alternativas rejeitadas e o que mudou desde a proposta |
 | [`docs/atividade-01.md`](docs/atividade-01.md) | Atividade em Grupo 01 — análise inicial (9 itens) |
 | [`docs/atividade-02.md`](docs/atividade-02.md) | Atividade em Grupo 02 — processamento e distribuição (13 itens) |
 
-Cada marco tem o seu próprio README com o que foi pedido, como foi feito, como rodar e como testar.
+Cada marco tem o seu próprio README com o que foi pedido, como foi feito, como rodar e
+como testar. Para rodar o sistema atual, veja
+[`marco-03/README.md` → Como rodar](marco-03/README.md#como-rodar).
 
 ## Estado atual
 
@@ -95,11 +110,12 @@ Cada marco tem o seu próprio README com o que foi pedido, como foi feito, como 
 |---|---|
 | Atividades 01 e 02 | análise concluída |
 | Marco 2 | fronteira aparelho ↔ servidor por MQTT, com contrato e falhas (ESP32 no Wokwi) |
-| Marco 3 | sistema com rádio de verdade (notebook como âncora Bluetooth, app Android) e segurança de ponta a ponta |
+| Marco 3 | sistema com rádio de verdade (notebook como âncora, app Android) e segurança de ponta a ponta; 49 testes no servidor e 22 no app |
 
 Próximos passos:
 
-- [ ] Três âncoras ESP32 físicas com malha ESP-NOW (o firmware de uma âncora já está em `marco-03/esp32-ancora/`)
+- [ ] Três âncoras ESP32 físicas com malha ESP-NOW e trilateração na sala real
 - [ ] Medição real da distância pelo sinal e ajuste do modelo
 - [ ] Restrição de tópicos por usuário (ACL) no broker
-- [ ] Painel do professor
+- [ ] Uma chave ativa por estudante
+- [ ] Painel do professor, com revisão de exceções
